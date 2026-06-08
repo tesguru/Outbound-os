@@ -93,7 +93,6 @@ class RecipientController extends Controller
         if (trim($websiteRaw)) {
             $lines = array_filter(array_map('trim', explode("\n", $websiteRaw)));
 
-            // Clear old websites for this campaign and re-save fresh
             CampaignWebsite::where('campaign_id', $campaignId)->delete();
 
             foreach ($lines as $url) {
@@ -154,6 +153,7 @@ class RecipientController extends Controller
             'company_initial_template_id'  => $request->company_initial_template_id,
         ]);
 
+        // ── Save personal followup sequences ──
         if ($request->has('personal_followup_sequences')) {
             CampaignFollowupSequence::where('campaign_id', $campaignId)
                                     ->where('type', 'personal')
@@ -171,6 +171,7 @@ class RecipientController extends Controller
             }
         }
 
+        // ── Save company followup sequences ──
         if ($request->has('company_followup_sequences')) {
             CampaignFollowupSequence::where('campaign_id', $campaignId)
                                     ->where('type', 'company')
@@ -188,9 +189,15 @@ class RecipientController extends Controller
             }
         }
 
+        // ── Assign recipients to accounts based on splits ──
         $accountSplits = $request->account_splits;
         $assignments   = [];
         $index         = 0;
+
+        Log::info('Confirm: account splits received', [
+            'splits'         => $accountSplits,
+            'total_analysed' => count($analysed),
+        ]);
 
         foreach ($accountSplits as $accountId => $count) {
             for ($i = 0; $i < (int) $count; $i++) {
@@ -201,6 +208,11 @@ class RecipientController extends Controller
             }
         }
 
+        Log::info('Confirm: assignments built', [
+            'total_assigned' => count($assignments),
+            'total_analysed' => count($analysed),
+        ]);
+
         $saved   = 0;
         $skipped = 0;
 
@@ -209,6 +221,10 @@ class RecipientController extends Controller
             $useType   = $request->use_types[$idx] ?? 'personal';
 
             if (!$accountId) {
+                Log::warning('Confirm: no account assigned for recipient', [
+                    'index' => $idx,
+                    'email' => $recipient['email'],
+                ]);
                 $skipped++;
                 continue;
             }
@@ -228,6 +244,11 @@ class RecipientController extends Controller
         }
 
         session()->forget('analysed_recipients_' . $campaignId);
+
+        Log::info('Confirm: recipients saved', [
+            'saved'   => $saved,
+            'skipped' => $skipped,
+        ]);
 
         return redirect()->route('campaigns.show', $campaignId)
                          ->with('success', "✅ {$saved} recipients added!" . ($skipped > 0 ? " {$skipped} skipped." : ''));
@@ -268,6 +289,7 @@ class RecipientController extends Controller
 
         foreach ($pendingRecipients as $recipient) {
             try {
+                // ── Pick correct template ──
                 $template = $recipient->personalization_type === 'first_name'
                             ? $campaign->personalInitialTemplate
                             : $campaign->companyInitialTemplate;
@@ -281,9 +303,28 @@ class RecipientController extends Controller
                     continue;
                 }
 
+                // ── Load THIS recipient's Gmail account ──
                 $gmailAccount = GmailAccount::find($recipient->gmail_account_id);
+
+                if (!$gmailAccount) {
+                    Log::warning('Draft batch: Gmail account not found', [
+                        'recipient'        => $recipient->email,
+                        'gmail_account_id' => $recipient->gmail_account_id,
+                    ]);
+                    $failed++;
+                    continue;
+                }
+
                 $gmailService = new GmailService($gmailAccount);
 
+                Log::info('Draft batch: processing recipient', [
+                    'recipient'    => $recipient->email,
+                    'gmail'        => $gmailAccount->email,
+                    'account_id'   => $gmailAccount->id,
+                    'template'     => $template->name,
+                ]);
+
+                // ── Replace placeholders ──
                 $subject = str_replace(
                     ['{{first_name}}', '{{company_name}}', '{{domain}}'],
                     [$recipient->first_name, $recipient->company_name, $campaign->domain],
@@ -296,6 +337,7 @@ class RecipientController extends Controller
                     $template->body
                 );
 
+                // ── Create the draft ──
                 $result = $gmailService->createDraft($recipient->email, $subject, $body);
 
                 if ($result['success']) {
@@ -305,23 +347,47 @@ class RecipientController extends Controller
                         'message_id' => $result['message_id'],
                     ]);
 
-                    if ($campaign->gmail_label_id) {
-                        $gmailService->addLabelToThread($result['thread_id'], $campaign->gmail_label_id);
+                    // ── Add label using THIS account's own label ID ──
+                    // We call getOrCreateLabel() on the current account so we
+                    // always use the correct label ID — not the one stored on
+                    // the campaign which belongs to account 1 only.
+                    if ($campaign->gmail_label_name) {
+                        try {
+                            $label = $gmailService->getOrCreateLabel($campaign->gmail_label_name);
+                            if ($label['success']) {
+                                $gmailService->addLabelToThread($result['thread_id'], $label['label_id']);
+                                Log::info('Draft batch: label added', [
+                                    'recipient' => $recipient->email,
+                                    'gmail'     => $gmailAccount->email,
+                                    'label_id'  => $label['label_id'],
+                                ]);
+                            }
+                        } catch (\Exception $e) {
+                            // Label failure should NOT fail the draft
+                            Log::warning('Draft batch: label add failed (non-fatal)', [
+                                'recipient' => $recipient->email,
+                                'gmail'     => $gmailAccount->email,
+                                'error'     => $e->getMessage(),
+                            ]);
+                        }
                     }
 
                     $created++;
+
                 } else {
                     Log::warning('Draft batch: createDraft returned failure', [
                         'recipient' => $recipient->email,
+                        'gmail'     => $gmailAccount->email,
                         'result'    => $result,
                     ]);
                     $failed++;
                 }
 
             } catch (\Exception $e) {
-                Log::error('Draft batch exception', [
+                Log::error('Draft batch: exception', [
                     'recipient' => $recipient->email,
                     'error'     => $e->getMessage(),
+                    'trace'     => $e->getTraceAsString(),
                 ]);
                 $failed++;
             }
@@ -394,7 +460,6 @@ class RecipientController extends Controller
                                         ->where('recipient_id', $recipient->id)
                                         ->count();
                 $nextSequence = $doneCount + 1;
-
                 $sequenceType = $recipient->personalization_type === 'first_name' ? 'personal' : 'company';
 
                 $sequenceEntry = CampaignFollowupSequence::where('campaign_id', $campaignId)
@@ -403,14 +468,13 @@ class RecipientController extends Controller
                                                           ->with('template')
                                                           ->first();
 
-                Log::info('Followup sequence lookup', [
-                    'recipient'            => $recipient->email,
-                    'personalization_type' => $recipient->personalization_type,
-                    'sequenceType'         => $sequenceType,
-                    'nextSequence'         => $nextSequence,
-                    'doneCount'            => $doneCount,
-                    'sequenceFound'        => $sequenceEntry ? $sequenceEntry->id : null,
-                    'templateFound'        => $sequenceEntry?->template?->id,
+                Log::info('Followup batch: sequence lookup', [
+                    'recipient'     => $recipient->email,
+                    'sequenceType'  => $sequenceType,
+                    'nextSequence'  => $nextSequence,
+                    'doneCount'     => $doneCount,
+                    'sequenceFound' => $sequenceEntry?->id,
+                    'templateFound' => $sequenceEntry?->template?->id,
                 ]);
 
                 if (!$sequenceEntry || !$sequenceEntry->template) {
@@ -418,12 +482,24 @@ class RecipientController extends Controller
                     continue;
                 }
 
-                $template     = $sequenceEntry->template;
+                $template = $sequenceEntry->template;
+
+                // ── Load THIS recipient's Gmail account ──
                 $gmailAccount = GmailAccount::find($recipient->gmail_account_id);
+
+                if (!$gmailAccount) {
+                    Log::warning('Followup batch: Gmail account not found', [
+                        'recipient'        => $recipient->email,
+                        'gmail_account_id' => $recipient->gmail_account_id,
+                    ]);
+                    $failed++;
+                    continue;
+                }
+
                 $gmailService = new GmailService($gmailAccount);
+                $threadData   = $gmailService->getThreadMessages($recipient->thread_id);
 
-                $threadData = $gmailService->getThreadMessages($recipient->thread_id);
-
+                // ── Replace placeholders ──
                 $subject = 'Re: ' . str_replace(
                     ['{{first_name}}', '{{company_name}}', '{{domain}}'],
                     [$recipient->first_name, $recipient->company_name, $campaign->domain],
@@ -436,6 +512,7 @@ class RecipientController extends Controller
                     $template->body
                 );
 
+                // ── Create follow-up draft in the correct thread ──
                 $result = $gmailService->createFollowUpDraft(
                     $recipient->email,
                     $subject,
@@ -456,17 +533,26 @@ class RecipientController extends Controller
                         'sequence'     => $nextSequence,
                         'status'       => 'draft_created',
                     ]);
+
+                    Log::info('Followup batch: draft created', [
+                        'recipient'    => $recipient->email,
+                        'gmail'        => $gmailAccount->email,
+                        'sequence'     => $nextSequence,
+                    ]);
+
                     $created++;
+
                 } else {
                     Log::warning('Followup batch: createFollowUpDraft returned failure', [
                         'recipient' => $recipient->email,
+                        'gmail'     => $gmailAccount->email,
                         'result'    => $result,
                     ]);
                     $failed++;
                 }
 
             } catch (\Exception $e) {
-                Log::error('Followup batch exception', [
+                Log::error('Followup batch: exception', [
                     'recipient' => $recipient->email,
                     'error'     => $e->getMessage(),
                     'trace'     => $e->getTraceAsString(),
