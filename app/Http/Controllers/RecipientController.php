@@ -257,325 +257,323 @@ class RecipientController extends Controller
     // ============================================================
     // CREATE DRAFTS — BATCHED
     // ============================================================
-    public function createDraftsBatch(Request $request, $campaignId)
-    {
-        set_time_limit(0);
-        ini_set('max_execution_time', 0);
+   // ============================================================
+// CREATE DRAFTS — BATCHED (small batches + inter-request pacing)
+// ============================================================
+public function createDraftsBatch(Request $request, $campaignId)
+{
+    set_time_limit(0);
+    ini_set('max_execution_time', 0);
 
-        $campaign = Campaign::where('id', $campaignId)
-                            ->where('user_id', Auth::id())
-                            ->with(['personalInitialTemplate', 'companyInitialTemplate'])
-                            ->firstOrFail();
+    $campaign = Campaign::where('id', $campaignId)
+                        ->where('user_id', Auth::id())
+                        ->with(['personalInitialTemplate', 'companyInitialTemplate'])
+                        ->firstOrFail();
 
-        $batchSize = 10;
+    // Smaller batch = shorter request = less chance of hitting proxy/server
+    // timeouts, and less chance of bursting Gmail's rate limits at once.
+    $batchSize = 5;
 
-        $pendingRecipients = Recipient::where('campaign_id', $campaignId)
-                                      ->where('status', 'pending')
-                                      ->take($batchSize)
-                                      ->get();
+    $pendingRecipients = Recipient::where('campaign_id', $campaignId)
+                                  ->where('status', 'pending')
+                                  ->take($batchSize)
+                                  ->get();
 
-        if ($pendingRecipients->isEmpty()) {
-            return response()->json([
-                'success'   => true,
-                'done'      => true,
-                'created'   => 0,
-                'failed'    => 0,
-                'remaining' => 0,
-            ]);
-        }
-
-        $created = 0;
-        $failed  = 0;
-
-        foreach ($pendingRecipients as $recipient) {
-            try {
-                // ── Pick correct template ──
-                $template = $recipient->personalization_type === 'first_name'
-                            ? $campaign->personalInitialTemplate
-                            : $campaign->companyInitialTemplate;
-
-                if (!$template) {
-                    Log::warning('Draft batch: no template found', [
-                        'recipient'            => $recipient->email,
-                        'personalization_type' => $recipient->personalization_type,
-                    ]);
-                    $failed++;
-                    continue;
-                }
-
-                // ── Load THIS recipient's Gmail account ──
-                $gmailAccount = GmailAccount::find($recipient->gmail_account_id);
-
-                if (!$gmailAccount) {
-                    Log::warning('Draft batch: Gmail account not found', [
-                        'recipient'        => $recipient->email,
-                        'gmail_account_id' => $recipient->gmail_account_id,
-                    ]);
-                    $failed++;
-                    continue;
-                }
-
-                $gmailService = new GmailService($gmailAccount);
-
-                Log::info('Draft batch: processing recipient', [
-                    'recipient'    => $recipient->email,
-                    'gmail'        => $gmailAccount->email,
-                    'account_id'   => $gmailAccount->id,
-                    'template'     => $template->name,
-                ]);
-
-                // ── Replace placeholders ──
-                $subject = str_replace(
-                    ['{{first_name}}', '{{company_name}}', '{{domain}}'],
-                    [$recipient->first_name, $recipient->company_name, $campaign->domain],
-                    $template->subject
-                );
-
-                $body = str_replace(
-                    ['{{first_name}}', '{{company_name}}', '{{domain}}'],
-                    [$recipient->first_name, $recipient->company_name, $campaign->domain],
-                    $template->body
-                );
-
-                // ── Create the draft ──
-                $result = $gmailService->createDraft($recipient->email, $subject, $body);
-
-                if ($result['success']) {
-                    $recipient->update([
-                        'status'     => 'draft_created',
-                        'thread_id'  => $result['thread_id'],
-                        'message_id' => $result['message_id'],
-                    ]);
-
-                    // ── Add label using THIS account's own label ID ──
-                    // We call getOrCreateLabel() on the current account so we
-                    // always use the correct label ID — not the one stored on
-                    // the campaign which belongs to account 1 only.
-                    if ($campaign->gmail_label_name) {
-                        try {
-                            $label = $gmailService->getOrCreateLabel($campaign->gmail_label_name);
-                            if ($label['success']) {
-                                $gmailService->addLabelToThread($result['thread_id'], $label['label_id']);
-                                Log::info('Draft batch: label added', [
-                                    'recipient' => $recipient->email,
-                                    'gmail'     => $gmailAccount->email,
-                                    'label_id'  => $label['label_id'],
-                                ]);
-                            }
-                        } catch (\Exception $e) {
-                            // Label failure should NOT fail the draft
-                            Log::warning('Draft batch: label add failed (non-fatal)', [
-                                'recipient' => $recipient->email,
-                                'gmail'     => $gmailAccount->email,
-                                'error'     => $e->getMessage(),
-                            ]);
-                        }
-                    }
-
-                    $created++;
-
-                } else {
-                    Log::warning('Draft batch: createDraft returned failure', [
-                        'recipient' => $recipient->email,
-                        'gmail'     => $gmailAccount->email,
-                        'result'    => $result,
-                    ]);
-                    $failed++;
-                }
-
-            } catch (\Exception $e) {
-                Log::error('Draft batch: exception', [
-                    'recipient' => $recipient->email,
-                    'error'     => $e->getMessage(),
-                    'trace'     => $e->getTraceAsString(),
-                ]);
-                $failed++;
-            }
-        }
-
-        $remaining = Recipient::where('campaign_id', $campaignId)
-                               ->where('status', 'pending')
-                               ->count();
-
+    if ($pendingRecipients->isEmpty()) {
         return response()->json([
             'success'   => true,
-            'done'      => $remaining === 0,
-            'created'   => $created,
-            'failed'    => $failed,
-            'remaining' => $remaining,
+            'done'      => true,
+            'created'   => 0,
+            'failed'    => 0,
+            'remaining' => 0,
         ]);
     }
 
-    // ============================================================
-    // CREATE FOLLOW-UP DRAFTS — BATCHED
-    // ============================================================
-    public function createFollowupsBatch(Request $request, $campaignId)
-    {
-        set_time_limit(0);
-        ini_set('max_execution_time', 0);
+    $created = 0;
+    $failed  = 0;
+    $rateLimited = false;
 
-        $input = json_decode($request->getContent(), true) ?? [];
+    foreach ($pendingRecipients as $recipient) {
+        try {
+            $template = $recipient->personalization_type === 'first_name'
+                        ? $campaign->personalInitialTemplate
+                        : $campaign->companyInitialTemplate;
 
-        $campaign = Campaign::where('id', $campaignId)
-                            ->where('user_id', Auth::id())
-                            ->with(['followupSequences.template'])
-                            ->firstOrFail();
+            if (!$template) {
+                Log::warning('Draft batch: no template found', [
+                    'recipient'            => $recipient->email,
+                    'personalization_type' => $recipient->personalization_type,
+                ]);
+                $failed++;
+                continue;
+            }
 
-        $price     = $input['price'] ?? null;
-        $batchSize = 10;
-        $offset    = (int) ($input['offset'] ?? 0);
+            $gmailAccount = GmailAccount::find($recipient->gmail_account_id);
 
-        $sentRecipients = Recipient::where('campaign_id', $campaignId)
-                                   ->where('status', 'sent')
-                                   ->whereNotNull('thread_id')
-                                   ->skip($offset)
-                                   ->take($batchSize)
-                                   ->get();
+            if (!$gmailAccount) {
+                Log::warning('Draft batch: Gmail account not found', [
+                    'recipient'        => $recipient->email,
+                    'gmail_account_id' => $recipient->gmail_account_id,
+                ]);
+                $failed++;
+                continue;
+            }
 
-        $totalSent = Recipient::where('campaign_id', $campaignId)
-                               ->where('status', 'sent')
-                               ->whereNotNull('thread_id')
-                               ->count();
+            $gmailService = new GmailService($gmailAccount);
 
-        if ($sentRecipients->isEmpty()) {
-            return response()->json([
-                'success'   => true,
-                'done'      => true,
-                'created'   => 0,
-                'skipped'   => 0,
-                'failed'    => 0,
-                'maxed'     => 0,
-                'remaining' => 0,
-            ]);
-        }
+            $subject = str_replace(
+                ['{{first_name}}', '{{company_name}}', '{{domain}}'],
+                [$recipient->first_name, $recipient->company_name, $campaign->domain],
+                $template->subject
+            );
 
-        $created = 0;
-        $skipped = 0;
-        $failed  = 0;
-        $maxed   = 0;
+            $body = str_replace(
+                ['{{first_name}}', '{{company_name}}', '{{domain}}'],
+                [$recipient->first_name, $recipient->company_name, $campaign->domain],
+                $template->body
+            );
 
-        foreach ($sentRecipients as $recipient) {
-            try {
-                $doneCount    = Followup::where('campaign_id', $campaignId)
-                                        ->where('recipient_id', $recipient->id)
-                                        ->count();
-                $nextSequence = $doneCount + 1;
-                $sequenceType = $recipient->personalization_type === 'first_name' ? 'personal' : 'company';
+            $result = $gmailService->createDraft($recipient->email, $subject, $body);
 
-                $sequenceEntry = CampaignFollowupSequence::where('campaign_id', $campaignId)
-                                                          ->where('type', $sequenceType)
-                                                          ->where('sequence', $nextSequence)
-                                                          ->with('template')
-                                                          ->first();
-
-                Log::info('Followup batch: sequence lookup', [
-                    'recipient'     => $recipient->email,
-                    'sequenceType'  => $sequenceType,
-                    'nextSequence'  => $nextSequence,
-                    'doneCount'     => $doneCount,
-                    'sequenceFound' => $sequenceEntry?->id,
-                    'templateFound' => $sequenceEntry?->template?->id,
+            if ($result['success']) {
+                $recipient->update([
+                    'status'     => 'draft_created',
+                    'thread_id'  => $result['thread_id'],
+                    'message_id' => $result['message_id'],
                 ]);
 
-                if (!$sequenceEntry || !$sequenceEntry->template) {
-                    $maxed++;
-                    continue;
+                if ($campaign->gmail_label_name) {
+                    try {
+                        $label = $gmailService->getOrCreateLabel($campaign->gmail_label_name);
+                        if ($label['success']) {
+                            $gmailService->addLabelToThread($result['thread_id'], $label['label_id']);
+                        }
+                    } catch (\Exception $e) {
+                        Log::warning('Draft batch: label add failed (non-fatal)', [
+                            'recipient' => $recipient->email,
+                            'gmail'     => $gmailAccount->email,
+                            'error'     => $e->getMessage(),
+                        ]);
+                    }
                 }
 
-                $template = $sequenceEntry->template;
+                $created++;
 
-                // ── Load THIS recipient's Gmail account ──
-                $gmailAccount = GmailAccount::find($recipient->gmail_account_id);
-
-                if (!$gmailAccount) {
-                    Log::warning('Followup batch: Gmail account not found', [
-                        'recipient'        => $recipient->email,
-                        'gmail_account_id' => $recipient->gmail_account_id,
-                    ]);
-                    $failed++;
-                    continue;
+            } else {
+                // Detect Gmail rate-limit style failures so the frontend can
+                // slow itself down instead of hammering harder.
+                $errMsg = strtolower(json_encode($result));
+                if (str_contains($errMsg, 'rate') || str_contains($errMsg, '429') || str_contains($errMsg, 'quota')) {
+                    $rateLimited = true;
                 }
 
-                $gmailService = new GmailService($gmailAccount);
-                $threadData   = $gmailService->getThreadMessages($recipient->thread_id);
-
-                // ── Replace placeholders ──
-                $subject = 'Re: ' . str_replace(
-                    ['{{first_name}}', '{{company_name}}', '{{domain}}'],
-                    [$recipient->first_name, $recipient->company_name, $campaign->domain],
-                    $template->subject
-                );
-
-                $body = str_replace(
-                    ['{{first_name}}', '{{company_name}}', '{{domain}}', '{{price}}'],
-                    [$recipient->first_name, $recipient->company_name, $campaign->domain, $price ?? ''],
-                    $template->body
-                );
-
-                // ── Create follow-up draft in the correct thread ──
-                $result = $gmailService->createFollowUpDraft(
-                    $recipient->email,
-                    $subject,
-                    $body,
-                    $recipient->thread_id,
-                    $threadData['success'] ? $threadData['message_id'] : null,
-                    $threadData['success'] ? $threadData['references']  : null,
-                );
-
-                if ($result['success']) {
-                    Followup::create([
-                        'campaign_id'  => $campaignId,
-                        'recipient_id' => $recipient->id,
-                        'template_id'  => $template->id,
-                        'draft_id'     => $result['draft_id'],
-                        'thread_id'    => $result['thread_id'],
-                        'price'        => $price ?: null,
-                        'sequence'     => $nextSequence,
-                        'status'       => 'draft_created',
-                    ]);
-
-                    Log::info('Followup batch: draft created', [
-                        'recipient'    => $recipient->email,
-                        'gmail'        => $gmailAccount->email,
-                        'sequence'     => $nextSequence,
-                    ]);
-
-                    $created++;
-
-                } else {
-                    Log::warning('Followup batch: createFollowUpDraft returned failure', [
-                        'recipient' => $recipient->email,
-                        'gmail'     => $gmailAccount->email,
-                        'result'    => $result,
-                    ]);
-                    $failed++;
-                }
-
-            } catch (\Exception $e) {
-                Log::error('Followup batch: exception', [
+                Log::warning('Draft batch: createDraft returned failure', [
                     'recipient' => $recipient->email,
-                    'error'     => $e->getMessage(),
-                    'trace'     => $e->getTraceAsString(),
+                    'gmail'     => $gmailAccount->email,
+                    'result'    => $result,
                 ]);
                 $failed++;
             }
+
+        } catch (\Exception $e) {
+            $errMsg = strtolower($e->getMessage());
+            if (str_contains($errMsg, 'rate') || str_contains($errMsg, '429') || str_contains($errMsg, 'quota')) {
+                $rateLimited = true;
+            }
+
+            Log::error('Draft batch: exception', [
+                'recipient' => $recipient->email,
+                'error'     => $e->getMessage(),
+                'trace'     => $e->getTraceAsString(),
+            ]);
+            $failed++;
         }
 
-        $nextOffset = $offset + $batchSize;
-        $remaining  = max(0, $totalSent - $nextOffset);
-        $done       = $nextOffset >= $totalSent;
+        // Small pause between individual Gmail API calls within the batch —
+        // spreads out 5 calls instead of firing them back-to-back.
+        usleep(250000); // 250ms
+    }
 
+    $remaining = Recipient::where('campaign_id', $campaignId)
+                           ->where('status', 'pending')
+                           ->count();
+
+    return response()->json([
+        'success'      => true,
+        'done'         => $remaining === 0,
+        'created'      => $created,
+        'failed'       => $failed,
+        'remaining'    => $remaining,
+        'rate_limited' => $rateLimited,
+    ]);
+}
+
+// ============================================================
+// CREATE FOLLOW-UP DRAFTS — BATCHED
+// ============================================================
+public function createFollowupsBatch(Request $request, $campaignId)
+{
+    set_time_limit(0);
+    ini_set('max_execution_time', 0);
+
+    $input = json_decode($request->getContent(), true) ?? [];
+
+    $campaign = Campaign::where('id', $campaignId)
+                        ->where('user_id', Auth::id())
+                        ->with(['followupSequences.template'])
+                        ->firstOrFail();
+
+    $price     = $input['price'] ?? null;
+    $batchSize = 5;
+    $offset    = (int) ($input['offset'] ?? 0);
+
+    $sentRecipients = Recipient::where('campaign_id', $campaignId)
+                               ->where('status', 'sent')
+                               ->whereNotNull('thread_id')
+                               ->skip($offset)
+                               ->take($batchSize)
+                               ->get();
+
+    $totalSent = Recipient::where('campaign_id', $campaignId)
+                           ->where('status', 'sent')
+                           ->whereNotNull('thread_id')
+                           ->count();
+
+    if ($sentRecipients->isEmpty()) {
         return response()->json([
-            'success'     => true,
-            'done'        => $done,
-            'created'     => $created,
-            'skipped'     => $skipped,
-            'failed'      => $failed,
-            'maxed'       => $maxed,
-            'next_offset' => $nextOffset,
-            'remaining'   => $remaining,
+            'success'   => true,
+            'done'      => true,
+            'created'   => 0,
+            'skipped'   => 0,
+            'failed'    => 0,
+            'maxed'     => 0,
+            'remaining' => 0,
         ]);
     }
+
+    $created = 0;
+    $skipped = 0;
+    $failed  = 0;
+    $maxed   = 0;
+    $rateLimited = false;
+
+    foreach ($sentRecipients as $recipient) {
+        try {
+            $doneCount    = Followup::where('campaign_id', $campaignId)
+                                    ->where('recipient_id', $recipient->id)
+                                    ->count();
+            $nextSequence = $doneCount + 1;
+            $sequenceType = $recipient->personalization_type === 'first_name' ? 'personal' : 'company';
+
+            $sequenceEntry = CampaignFollowupSequence::where('campaign_id', $campaignId)
+                                                      ->where('type', $sequenceType)
+                                                      ->where('sequence', $nextSequence)
+                                                      ->with('template')
+                                                      ->first();
+
+            if (!$sequenceEntry || !$sequenceEntry->template) {
+                $maxed++;
+                continue;
+            }
+
+            $template = $sequenceEntry->template;
+
+            $gmailAccount = GmailAccount::find($recipient->gmail_account_id);
+
+            if (!$gmailAccount) {
+                Log::warning('Followup batch: Gmail account not found', [
+                    'recipient'        => $recipient->email,
+                    'gmail_account_id' => $recipient->gmail_account_id,
+                ]);
+                $failed++;
+                continue;
+            }
+
+            $gmailService = new GmailService($gmailAccount);
+            $threadData   = $gmailService->getThreadMessages($recipient->thread_id);
+
+            $subject = 'Re: ' . str_replace(
+                ['{{first_name}}', '{{company_name}}', '{{domain}}'],
+                [$recipient->first_name, $recipient->company_name, $campaign->domain],
+                $template->subject
+            );
+
+            $body = str_replace(
+                ['{{first_name}}', '{{company_name}}', '{{domain}}', '{{price}}'],
+                [$recipient->first_name, $recipient->company_name, $campaign->domain, $price ?? ''],
+                $template->body
+            );
+
+            $result = $gmailService->createFollowUpDraft(
+                $recipient->email,
+                $subject,
+                $body,
+                $recipient->thread_id,
+                $threadData['success'] ? $threadData['message_id'] : null,
+                $threadData['success'] ? $threadData['references']  : null,
+            );
+
+            if ($result['success']) {
+                Followup::create([
+                    'campaign_id'  => $campaignId,
+                    'recipient_id' => $recipient->id,
+                    'template_id'  => $template->id,
+                    'draft_id'     => $result['draft_id'],
+                    'thread_id'    => $result['thread_id'],
+                    'price'        => $price ?: null,
+                    'sequence'     => $nextSequence,
+                    'status'       => 'draft_created',
+                ]);
+
+                $created++;
+
+            } else {
+                $errMsg = strtolower(json_encode($result));
+                if (str_contains($errMsg, 'rate') || str_contains($errMsg, '429') || str_contains($errMsg, 'quota')) {
+                    $rateLimited = true;
+                }
+
+                Log::warning('Followup batch: createFollowUpDraft returned failure', [
+                    'recipient' => $recipient->email,
+                    'gmail'     => $gmailAccount->email,
+                    'result'    => $result,
+                ]);
+                $failed++;
+            }
+
+        } catch (\Exception $e) {
+            $errMsg = strtolower($e->getMessage());
+            if (str_contains($errMsg, 'rate') || str_contains($errMsg, '429') || str_contains($errMsg, 'quota')) {
+                $rateLimited = true;
+            }
+
+            Log::error('Followup batch: exception', [
+                'recipient' => $recipient->email,
+                'error'     => $e->getMessage(),
+                'trace'     => $e->getTraceAsString(),
+            ]);
+            $failed++;
+        }
+
+        usleep(250000); // 250ms between recipients
+    }
+
+    $nextOffset = $offset + $batchSize;
+    $remaining  = max(0, $totalSent - $nextOffset);
+    $done       = $nextOffset >= $totalSent;
+
+    return response()->json([
+        'success'      => true,
+        'done'         => $done,
+        'created'      => $created,
+        'skipped'      => $skipped,
+        'failed'       => $failed,
+        'maxed'        => $maxed,
+        'next_offset'  => $nextOffset,
+        'remaining'    => $remaining,
+        'rate_limited' => $rateLimited,
+    ]);
+}
 
     // ============================================================
     // MARK RECIPIENTS AS SENT

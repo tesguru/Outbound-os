@@ -30,18 +30,22 @@
 @section('content')
 
 {{-- Loading Overlay --}}
+{{-- Loading Overlay --}}
 <div id="loadingOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:999;align-items:center;justify-content:center;flex-direction:column;gap:1.5rem;">
-    <div style="text-align:center;">
+    <div style="text-align:center;width:340px;">
         <div style="width:56px;height:56px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 1.5rem;"></div>
-        <div id="loadingTitle" style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--text);margin-bottom:0.5rem;"></div>
-        <div id="loadingSubtitle" style="font-size:0.75rem;color:var(--muted);">Please wait — do not close this tab</div>
-        <div style="display:flex;gap:0.4rem;justify-content:center;margin-top:1.25rem;">
-            <div style="width:8px;height:8px;border-radius:50%;background:var(--accent);animation:dotPulse 1.2s ease-in-out infinite;"></div>
-            <div style="width:8px;height:8px;border-radius:50%;background:var(--accent);animation:dotPulse 1.2s ease-in-out 0.2s infinite;"></div>
-            <div style="width:8px;height:8px;border-radius:50%;background:var(--accent);animation:dotPulse 1.2s ease-in-out 0.4s infinite;"></div>
+        <div id="loadingTitle" style="font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--text);margin-bottom:0.75rem;"></div>
+
+        {{-- Progress bar --}}
+        <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:0.6rem;">
+            <div id="loadingBar" style="height:100%;width:0%;background:var(--accent);border-radius:3px;transition:width 0.3s ease;"></div>
         </div>
+        <div id="loadingPct" style="font-size:0.65rem;color:var(--accent);margin-bottom:0.75rem;">0%</div>
+
+        <div id="loadingSubtitle" style="font-size:0.75rem;color:var(--muted);"></div>
+
         <div id="loadingTimer" style="margin-top:1rem;font-size:0.68rem;color:var(--muted);display:none;">
-            ⏱ This may take a while for large batches — hang tight...
+            ⏱ Large batch — this can take a while. It's safe to leave this tab open in the background; progress is saved, so if it's interrupted you can just click the button again to resume.
         </div>
     </div>
 </div>
@@ -424,17 +428,24 @@ let   timerHandle       = null;
 // ============================================================
 function showLoading(title) {
     document.getElementById('loadingTitle').textContent     = title;
-    document.getElementById('loadingSubtitle').textContent  = 'Please wait — do not close this tab';
-    document.getElementById('loadingTimer').style.display   = 'none';
-    document.getElementById('loadingOverlay').style.display = 'flex';
+    document.getElementById('loadingSubtitle').textContent  = 'Starting…';
+    document.getElementById('loadingBar').style.width        = '0%';
+    document.getElementById('loadingPct').textContent        = '0%';
+    document.getElementById('loadingTimer').style.display    = 'none';
+    document.getElementById('loadingOverlay').style.display  = 'flex';
 
     timerHandle = setTimeout(() => {
         document.getElementById('loadingTimer').style.display = 'block';
-    }, 5000);
+    }, 6000);
 }
 
-function updateLoadingStatus(text) {
+function updateLoadingStatus(text, pct) {
     document.getElementById('loadingSubtitle').textContent = text;
+    if (pct !== undefined) {
+        const clamped = Math.max(0, Math.min(100, pct));
+        document.getElementById('loadingBar').style.width = clamped + '%';
+        document.getElementById('loadingPct').textContent = clamped + '%';
+    }
 }
 
 function hideLoading() {
@@ -461,13 +472,23 @@ function openAllWebsites() {
 }
 
 // ============================================================
-// CREATE DRAFTS
+// SLEEP HELPER
+// ============================================================
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================
+// CREATE DRAFTS — resilient, resumable, paced
 // ============================================================
 async function createDrafts() {
-    if (!confirm('Create drafts for all {{ $statusCounts["pending"] }} pending recipients?')) return;
+    const totalPending = {{ $statusCounts['pending'] }};
+    if (!confirm(`Create drafts for all ${totalPending} pending recipients? This may take a while for large lists — you can leave the tab open in the background.`)) return;
 
-    let totalCreated = 0;
-    let totalFailed  = 0;
+    let totalCreated      = 0;
+    let totalFailed       = 0;
+    let consecutiveErrors = 0;
+    let pacingDelay        = 500; // ms between batches, grows if rate-limited
 
     showLoading('⚡ Creating Drafts...');
 
@@ -485,25 +506,57 @@ async function createDrafts() {
                 body: JSON.stringify({}),
             });
 
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             data = await res.json();
+            consecutiveErrors = 0;
         } catch (err) {
-            console.error('Network error on drafts batch:', err);
-            break;
+            console.error('Network/server error on drafts batch:', err);
+            consecutiveErrors++;
+
+            if (consecutiveErrors >= 6) {
+                hideLoading();
+                showToast(`❌ Stopped after repeated errors.<br>✅ <strong>${totalCreated}</strong> drafts created so far.<br>Click "Create Drafts" again to resume — it picks up exactly where it left off.`);
+                return;
+            }
+
+            updateLoadingStatus(`⚠️ Connection hiccup, retrying (attempt ${consecutiveErrors})…`);
+            await sleep(Math.min(3000 * consecutiveErrors, 15000));
+            continue;
         }
 
         if (!data.success) {
-            console.error('Server error on drafts batch:', data);
-            break;
+            consecutiveErrors++;
+            if (consecutiveErrors >= 6) {
+                hideLoading();
+                showToast(`❌ Stopped after repeated server errors.<br>✅ <strong>${totalCreated}</strong> created so far.<br>Click "Create Drafts" again to resume.`);
+                return;
+            }
+            await sleep(3000);
+            continue;
         }
 
         totalCreated += data.created || 0;
         totalFailed  += data.failed  || 0;
 
+        const processed = totalCreated + totalFailed;
+        const pct        = totalPending > 0 ? Math.round((processed / totalPending) * 100) : 100;
+
         updateLoadingStatus(
-            `✅ ${totalCreated} done · ❌ ${totalFailed} failed · ⏳ ${data.remaining ?? 0} remaining`
+            `✅ ${totalCreated} done · ❌ ${totalFailed} failed · ⏳ ${data.remaining ?? 0} remaining`,
+            pct
         );
 
         if (data.done) break;
+
+        // If the server flagged a rate-limit signal from Gmail, back off harder.
+        if (data.rate_limited) {
+            pacingDelay = Math.min(pacingDelay * 2, 8000);
+            updateLoadingStatus(`⚠️ Gmail is rate-limiting — slowing down (waiting ${Math.round(pacingDelay/1000)}s)…`, pct);
+        } else {
+            pacingDelay = Math.max(500, pacingDelay * 0.9); // ease back down over time
+        }
+
+        await sleep(pacingDelay);
     }
 
     hideLoading();
@@ -514,7 +567,7 @@ async function createDrafts() {
 }
 
 // ============================================================
-// CREATE FOLLOW-UPS
+// CREATE FOLLOW-UPS — resilient, resumable, paced
 // ============================================================
 async function createFollowups() {
     const priceEl = document.getElementById('followupPrice');
@@ -528,11 +581,20 @@ async function createFollowups() {
 
     document.getElementById('followupModal').classList.remove('open');
 
-    let totalCreated = 0;
-    let totalSkipped = 0;
-    let totalFailed  = 0;
-    let totalMaxed   = 0;
-    let offset       = 0;
+    const totalSent = {{ $statusCounts['sent'] ?? 0 }};
+
+    let totalCreated      = 0;
+    let totalSkipped      = 0;
+    let totalFailed       = 0;
+    let totalMaxed        = 0;
+    let offset             = 0;
+    let consecutiveErrors = 0;
+    let pacingDelay        = 500;
+
+    // Resume from a previous run in this browser, if one exists for this campaign
+    const resumeKey = `followup_offset_${CAMPAIGN_ID}`;
+    const saved = sessionStorage.getItem(resumeKey);
+    if (saved) offset = parseInt(saved, 10) || 0;
 
     showLoading('🔁 Creating Follow-up Drafts...');
 
@@ -550,15 +612,33 @@ async function createFollowups() {
                 body: JSON.stringify({ offset, price }),
             });
 
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             data = await res.json();
+            consecutiveErrors = 0;
         } catch (err) {
-            console.error('Network error on followups batch:', err);
-            break;
+            console.error('Network/server error on followups batch:', err);
+            consecutiveErrors++;
+
+            if (consecutiveErrors >= 6) {
+                hideLoading();
+                showToast(`❌ Stopped after repeated errors.<br>✅ <strong>${totalCreated}</strong> follow-ups created so far.<br>Click "Create Follow-ups" again to resume.`);
+                return;
+            }
+
+            updateLoadingStatus(`⚠️ Connection hiccup, retrying (attempt ${consecutiveErrors})…`);
+            await sleep(Math.min(3000 * consecutiveErrors, 15000));
+            continue;
         }
 
         if (!data.success) {
-            console.error('Server error on followups batch:', data);
-            break;
+            consecutiveErrors++;
+            if (consecutiveErrors >= 6) {
+                hideLoading();
+                showToast(`❌ Stopped after repeated server errors.<br>✅ <strong>${totalCreated}</strong> created so far.<br>Click "Create Follow-ups" again to resume.`);
+                return;
+            }
+            await sleep(3000);
+            continue;
         }
 
         totalCreated += data.created || 0;
@@ -567,11 +647,29 @@ async function createFollowups() {
         totalMaxed   += data.maxed   || 0;
         offset        = data.next_offset;
 
+        sessionStorage.setItem(resumeKey, offset);
+
+        const processed = offset;
+        const pct         = totalSent > 0 ? Math.round((processed / totalSent) * 100) : 100;
+
         updateLoadingStatus(
-            `✅ ${totalCreated} done · ⏳ ${data.remaining ?? 0} remaining`
+            `✅ ${totalCreated} done · ⏳ ${data.remaining ?? 0} remaining`,
+            pct
         );
 
-        if (data.done) break;
+        if (data.done) {
+            sessionStorage.removeItem(resumeKey);
+            break;
+        }
+
+        if (data.rate_limited) {
+            pacingDelay = Math.min(pacingDelay * 2, 8000);
+            updateLoadingStatus(`⚠️ Gmail is rate-limiting — slowing down (waiting ${Math.round(pacingDelay/1000)}s)…`, pct);
+        } else {
+            pacingDelay = Math.max(500, pacingDelay * 0.9);
+        }
+
+        await sleep(pacingDelay);
     }
 
     hideLoading();
