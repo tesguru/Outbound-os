@@ -44,4 +44,14 @@ class User extends Authenticatable
     {
         return $this->hasMany(Template::class);
     }
+
+    public function leads()
+    {
+        return $this->hasMany(Lead::class);
+    }
+
+    public function domains()
+    {
+        return $this->hasMany(Domain::class);
+    }
 }

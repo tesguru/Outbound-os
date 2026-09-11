@@ -76,6 +76,12 @@ class CampaignController extends Controller
             ]);
         }
 
+        // ── Track this domain in the Domain CRM (auto-create if missing) ──
+        \App\Models\Domain::firstOrCreate(
+            ['user_id' => Auth::id(), 'domain' => strtolower(trim($request->domain))],
+            ['price' => 0, 'currency' => 'USD', 'status' => 'outbounding']
+        );
+
         // ── Create Gmail label on EVERY account ──────────────────
         // Each Gmail account needs its own copy of the label.
         // We save the label ID/name from the first account as the

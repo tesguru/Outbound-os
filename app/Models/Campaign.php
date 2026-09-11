@@ -80,4 +80,9 @@ class Campaign extends Model
     {
         return $this->hasMany(CampaignWebsite::class);
     }
+
+    public function savedLeads()
+    {
+        return $this->hasMany(Lead::class, 'source_campaign_id');
+    }
 }

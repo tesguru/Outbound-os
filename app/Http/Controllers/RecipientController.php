@@ -7,6 +7,7 @@ use App\Models\CampaignFollowupSequence;
 use App\Models\CampaignWebsite;
 use App\Models\Followup;
 use App\Models\GmailAccount;
+use App\Models\Lead;
 use App\Models\Recipient;
 use App\Models\Template;
 use App\Services\GmailService;
@@ -26,7 +27,13 @@ class RecipientController extends Controller
                             ->with('gmailAccounts')
                             ->firstOrFail();
 
-        return view('recipients.paste', compact('campaign'));
+        $savedLeads = Lead::where('user_id', Auth::id())
+                          ->where('status', '!=', 'lost')
+                          ->orderBy('updated_at', 'desc')
+                          ->limit(500)
+                          ->get();
+
+        return view('recipients.paste', compact('campaign', 'savedLeads'));
     }
 
     // ============================================================
@@ -239,6 +246,21 @@ class RecipientController extends Controller
                 'status'               => 'pending',
                 'is_bounced'           => false,
             ]);
+
+            // ── Upsert into master Leads Saver list ──
+            $lead = Lead::firstOrNew([
+                'user_id' => Auth::id(),
+                'email'   => strtolower($recipient['email']),
+            ]);
+
+            $lead->fill([
+                'first_name'         => $request->first_names[$idx]   ?? $recipient['first_name'] ?? $lead->first_name,
+                'company_name'       => $request->company_names[$idx] ?? $recipient['company_name'] ?? $lead->company_name,
+                'domain'             => $campaign->domain ?: $lead->domain,
+                'source_campaign_id' => $campaignId,
+                'status'             => $lead->exists ? $lead->status : 'saved',
+            ]);
+            $lead->save();
 
             $saved++;
         }
@@ -586,6 +608,20 @@ public function createFollowupsBatch(Request $request, $campaignId)
                  ->whereIn('id', $request->recipient_ids)
                  ->update(['status' => 'sent']);
 
+        // Keep the master Leads Saver in sync
+        $emails = Recipient::where('campaign_id', $campaignId)
+                           ->whereIn('id', $request->recipient_ids)
+                           ->pluck('email')
+                           ->map(fn($e) => strtolower($e))
+                           ->all();
+
+        if (!empty($emails)) {
+            \App\Models\Lead::where('user_id', Auth::id())
+                            ->whereIn('email', $emails)
+                            ->where('status', 'saved')
+                            ->update(['status' => 'contacted']);
+        }
+
         return redirect()->route('campaigns.show', $campaignId)
                          ->with('success', '✅ Recipients marked as sent!');
     }
@@ -597,9 +633,17 @@ public function createFollowupsBatch(Request $request, $campaignId)
     {
         $request->validate(['recipient_id' => 'required|exists:recipients,id']);
 
-        Recipient::where('id', $request->recipient_id)
-                 ->where('campaign_id', $campaignId)
-                 ->update(['status' => 'replied']);
+        $recipient = Recipient::where('id', $request->recipient_id)
+                              ->where('campaign_id', $campaignId)
+                              ->firstOrFail();
+
+        $recipient->update(['status' => 'replied']);
+
+        // Keep the master Leads Saver in sync
+        \App\Models\Lead::where('user_id', Auth::id())
+                        ->where('email', strtolower($recipient->email))
+                        ->where('status', '!=', 'sold')
+                        ->update(['status' => 'replied']);
 
         return redirect()->route('campaigns.show', $campaignId)
                          ->with('success', '✅ Marked as replied!');

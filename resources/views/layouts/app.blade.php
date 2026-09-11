@@ -720,6 +720,14 @@
             <span class="icon">◎</span> Campaigns
         </a>
 
+        <div class="nav-label">Data</div>
+        <a href="{{ route('leads.index') }}" class="nav-item {{ request()->routeIs('leads.*') ? 'active' : '' }}" onclick="closeSidebar()">
+            <span class="icon">☾</span> Leads Saver
+        </a>
+        <a href="{{ route('domains.index') }}" class="nav-item {{ request()->routeIs('domains.*') ? 'active' : '' }}" onclick="closeSidebar()">
+            <span class="icon">🌐</span> Domain CRM
+        </a>
+
         <div class="nav-label">Setup</div>
         <a href="{{ route('gmail-accounts.index') }}" class="nav-item {{ request()->routeIs('gmail-accounts.*') ? 'active' : '' }}" onclick="closeSidebar()">
             <span class="icon">✉</span> Gmail Accounts
