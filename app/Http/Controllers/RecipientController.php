@@ -30,10 +30,12 @@ class RecipientController extends Controller
         $savedLeads = Lead::where('user_id', Auth::id())
                           ->where('status', '!=', 'lost')
                           ->orderBy('updated_at', 'desc')
-                          ->limit(500)
+                          ->limit(2000)
                           ->get();
 
-        return view('recipients.paste', compact('campaign', 'savedLeads'));
+        $leadLists = $savedLeads->groupBy(fn($l) => $l->list_name ?: 'No list');
+
+        return view('recipients.paste', compact('campaign', 'savedLeads', 'leadLists'));
     }
 
     // ============================================================

@@ -61,6 +61,7 @@
                 </div>
                 <div style="display:flex;align-items:center;gap:0.5rem;">
                     <span id="autosaveStatus" style="font-size:0.62rem;color:var(--muted);"></span>
+                    <input type="text" id="saveListName" class="form-input" placeholder="List name (optional)" style="width:170px;font-size:0.65rem;padding:0.35rem 0.5rem;">
                     <button type="button" class="btn btn-ghost" style="padding:0.35rem 0.75rem;font-size:0.65rem;" onclick="saveLeadsToMaster()">
                         💾 Save to Leads Saver
                     </button>
@@ -128,10 +129,21 @@
     <div class="modal">
         <button class="modal-close" onclick="document.getElementById('importLeadsModal').classList.remove('open')">✕</button>
         <div class="modal-title">☾ Import Saved Leads</div>
-        <div class="modal-sub">Pick saved leads to add to this campaign — their emails get added to the list below</div>
+        <div class="modal-sub">Pick a list — all its emails <b>and website links</b> get pre-filled into the boxes below</div>
+
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.75rem;">
+            <button type="button" class="btn btn-ghost import-list-chip" data-list="all" onclick="showImportList('all')" style="padding:0.35rem 0.75rem;font-size:0.62rem;">
+                All ({{ $savedLeads->count() }})
+            </button>
+            @foreach($leadLists as $listName => $group)
+            <button type="button" class="btn btn-ghost import-list-chip" data-list="{{ $listName }}" onclick="showImportList('{{ addslashes((string)$listName) }}')" style="padding:0.35rem 0.75rem;font-size:0.62rem;">
+                ☾ {{ $listName }} ({{ $group->count() }})
+            </button>
+            @endforeach
+        </div>
 
         <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem;">
-            <button type="button" class="btn btn-ghost" style="padding:0.35rem 0.75rem;font-size:0.65rem;" onclick="toggleAllLeads(true)">✅ Select All</button>
+            <button type="button" class="btn btn-ghost" style="padding:0.35rem 0.75rem;font-size:0.65rem;" onclick="toggleAllLeads(true)">✅ Select All (in list)</button>
             <button type="button" class="btn btn-ghost" style="padding:0.35rem 0.75rem;font-size:0.65rem;" onclick="toggleAllLeads(false)">✕ Deselect</button>
             <span style="font-size:0.65rem;color:var(--muted);align-self:center;margin-left:auto;" id="importSelectedCount">0 selected</span>
         </div>
@@ -139,16 +151,23 @@
         <div style="max-height:340px;overflow-y:auto;margin-bottom:1rem;border:1px solid var(--border);border-radius:8px;">
             @forelse($savedLeads as $lead)
             <label style="display:flex;align-items:center;gap:0.75rem;padding:0.6rem 0.875rem;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.1s;">
-                <input type="checkbox" class="lead-import-checkbox" value="{{ $lead->email }}" style="accent-color:var(--accent);width:15px;height:15px;flex-shrink:0;">
+                <input type="checkbox" class="lead-import-checkbox"
+                       value="{{ $lead->email }}"
+                       data-list="{{ $lead->list_name ?: 'No list' }}"
+                       data-website="{{ $lead->website }}"
+                       style="accent-color:var(--accent);width:15px;height:15px;flex-shrink:0;">
                 <div style="flex:1;min-width:0;">
                     <div style="font-size:0.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ $lead->email }}</div>
                     <div style="font-size:0.62rem;color:var(--muted);margin-top:0.1rem;">
                         {{ $lead->first_name ?? '—' }} · {{ $lead->company_name ?? '—' }}
-                        @if($lead->domain)
-                            · <span style="color:var(--accent);">{{ $lead->domain }}</span>
+                        @if($lead->list_name)
+                            · <span style="color:var(--blue);">☾ {{ $lead->list_name }}</span>
                         @endif
                     </div>
                 </div>
+                @if($lead->website)
+                    <span style="font-size:0.62rem;color:var(--accent);">🌐 saved</span>
+                @endif
             </label>
             @empty
                 <div style="padding:1.5rem;text-align:center;font-size:0.75rem;color:var(--muted);">
@@ -159,7 +178,7 @@
 
         <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
             <button type="button" class="btn btn-ghost" onclick="document.getElementById('importLeadsModal').classList.remove('open')">Cancel</button>
-            <button type="button" class="btn btn-primary" onclick="importSelectedLeads()">Import Selected →</button>
+            <button type="button" class="btn btn-primary" onclick="importSelectedLeads()">Import List →</button>
         </div>
     </div>
 </div>
@@ -230,6 +249,8 @@
             return;
         }
 
+        const listName = (document.getElementById('saveListName') || {}).value || '';
+
         setAutosaveStatus('⏳ Saving…');
 
         try {
@@ -244,6 +265,7 @@
                     emails:      raw,
                     domain:      CAMPAIGN_DOMAIN,
                     campaign_id: CAMPAIGN_ID,
+                    list_name:   listName,
                 }),
             });
 
@@ -274,7 +296,7 @@
     });
 
     // ============================================================
-    // IMPORT SAVED LEADS
+    // IMPORT SAVED LEADS (by list name)
     // ============================================================
     const importCheckboxes = () => document.querySelectorAll('.lead-import-checkbox');
 
@@ -283,33 +305,73 @@
         document.getElementById('importSelectedCount').textContent = checked + ' selected';
     }
 
+    function showImportList(name) {
+        document.querySelectorAll('.import-list-chip').forEach(chip => {
+            const active = chip.dataset.list === name;
+            chip.style.background    = active ? 'var(--accent-dim)' : '';
+            chip.style.borderColor   = active ? 'rgba(74,222,128,0.3)' : '';
+            chip.style.color         = active ? 'var(--accent)' : '';
+        });
+
+        document.querySelectorAll('.lead-import-checkbox').forEach(cb => {
+            const visible = name === 'all' || cb.dataset.list === name;
+            cb.closest('label').style.display = visible ? '' : 'none';
+            if (!visible) cb.checked = false;
+        });
+
+        updateImportCount();
+    }
+
     function toggleAllLeads(check) {
-        importCheckboxes().forEach(cb => cb.checked = check);
+        document.querySelectorAll('.lead-import-checkbox').forEach(cb => {
+            if (cb.closest('label').style.display !== 'none') cb.checked = check;
+        });
         updateImportCount();
     }
 
     document.querySelectorAll('.lead-import-checkbox').forEach(cb => cb.addEventListener('change', updateImportCount));
+    showImportList('all');
 
     function importSelectedLeads() {
-        const emails = [...importCheckboxes()].filter(cb => cb.checked).map(cb => cb.value);
-        if (!emails.length) return;
+        const checked = [...importCheckboxes()].filter(cb => cb.checked);
+        if (!checked.length) return;
 
-        const current = textarea.value.trim();
+        // ── Emails ──────────────────────────────────────────────
+        const emails   = checked.map(cb => cb.value);
+        const current  = textarea.value.trim();
         const existing = new Set((current.match(emailRegex) || []).map(e => e.toLowerCase()));
-
         const newEmails = emails.filter(e => !existing.has(e.toLowerCase()));
-        if (!newEmails.length) {
-            document.getElementById('importLeadsModal').classList.remove('open');
-            showAutosaveResult('ℹ️ Those leads are already in the list below.');
-            return;
+        if (newEmails.length) {
+            textarea.value = current ? current + '\n' + newEmails.join('\n') : newEmails.join('\n');
+            countEmails();
         }
 
-        textarea.value = current ? current + '\n' + newEmails.join('\n') : newEmails.join('\n');
-        lastSavedRaw  = '';
-        countEmails();
+        // ── Website links ───────────────────────────────────────
+        const websites   = checked.map(cb => cb.dataset.website).filter(w => w && w.trim());
+        const seenUrls   = new Set();
+        const toAddUrls  = [];
+        if (websites.length) {
+            const existingUrls = new Set(urlTextarea.value.split('\n').map(l => l.trim().toLowerCase()).filter(Boolean));
+            websites.forEach(w => {
+                const key = w.trim().toLowerCase();
+                if (!existingUrls.has(key) && !seenUrls.has(key)) {
+                    seenUrls.add(key);
+                    toAddUrls.push(w.trim());
+                }
+            });
+            if (toAddUrls.length) {
+                urlTextarea.value = urlTextarea.value.trim() ? urlTextarea.value.trim() + '\n' + toAddUrls.join('\n') : toAddUrls.join('\n');
+                countUrls();
+            }
+        }
 
         document.getElementById('importLeadsModal').classList.remove('open');
-        showAutosaveResult(`☾ Imported ${newEmails.length} saved lead(s) into this campaign. Click "Analyse Recipients" to continue.`);
+
+        if (newEmails.length) {
+            showAutosaveResult(`☾ Imported ${newEmails.length} saved lead(s)` + (toAddUrls.length ? ` + ${toAddUrls.length} website link(s) pre-filled` : '') + `. Click "Analyse Recipients" to continue.`);
+        } else {
+            showAutosaveResult(`ℹ️ Those emails were already in the list${toAddUrls.length ? ` — ${toAddUrls.length} website link(s) added instead` : '.'}`);
+        }
 
         // Restart autosave timer so imported leads get saved with campaign context
         clearTimeout(autosaveTimer);

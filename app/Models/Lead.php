@@ -13,6 +13,7 @@ class Lead extends Model
         'first_name',
         'company_name',
         'domain',
+        'list_name',
         'status',
         'website',
         'notes',

@@ -13,6 +13,7 @@
 
 @php
     $total  = $leads->count();
+    $allTotal = \App\Models\Lead::where('user_id', Auth::id())->count();
     $saved  = $leads->where('status', 'saved')->count();
     $replied = $leads->where('status', 'replied')->count();
     $sold   = $leads->where('status', 'sold')->count();
@@ -52,6 +53,10 @@
     <form action="{{ route('leads.bulk-store') }}" method="POST" id="bulkLeadForm">
         @csrf
         <input type="hidden" name="domain" value="{{ old('domain') }}">
+        <div class="form-group" style="margin-bottom:0.75rem;">
+            <label class="form-label">List Name <span style="font-weight:400;font-size:0.65rem;color:var(--muted);">(optional — gives this batch a name, e.g. "leads for example.com", so you can import the whole list later)</span></label>
+            <input type="text" name="list_name" class="form-input" placeholder="leads for example.com" style="max-width:360px;">
+        </div>
         <div class="form-group" style="margin-bottom:0.5rem;">
             <textarea
                 name="emails"
@@ -72,20 +77,35 @@
 </div>
 
 {{-- Leads table --}}
+@php $unlisted = $leads->count(); @endphp
 <div class="card">
     <div class="card-header">
         <div>
-            <div class="card-title">All Saved Leads</div>
-            <div class="card-sub">Click ✎ to edit a lead</div>
+            <div class="card-title">All Saved Leads @if($activeList) — {{ $activeList }} @endif</div>
+            <div class="card-sub">Click ✎ to edit a lead — name a list and import it into any campaign</div>
         </div>
-        <span class="badge badge-green">{{ $total }} leads</span>
+        <span class="badge badge-green">{{ $leads->count() }} leads</span>
     </div>
+
+    {{-- List filter --}}
+    @if($lists->isNotEmpty() || $activeList)
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;padding:0 1.25rem 1rem;">
+        <a href="{{ route('leads.index') }}" class="btn btn-ghost" style="padding:0.35rem 0.75rem;font-size:0.62rem;{{ !$activeList ? 'background:var(--accent-dim);border-color:rgba(74,222,128,0.3);color:var(--accent);' : '' }}">
+            All ({{ $allTotal }})
+        </a>
+        @foreach($lists as $l)
+        <a href="{{ route('leads.index', ['list' => $l->list_name]) }}" class="btn btn-ghost" style="padding:0.35rem 0.75rem;font-size:0.62rem;{{ $activeList === $l->list_name ? 'background:var(--accent-dim);border-color:rgba(74,222,128,0.3);color:var(--accent);' : '' }}">
+            ☾ {{ $l->list_name }} ({{ $l->total }})
+        </a>
+        @endforeach
+    </div>
+    @endif
 
     @if($leads->isEmpty())
         <div class="empty">
             <div class="empty-icon">☾</div>
             <h3>No saved leads yet</h3>
-            <p>Paste leads above, or save them while collecting recipients on a campaign page</p>
+            <p>Paste leads above — give the batch a List Name so you can import it into any campaign later</p>
         </div>
     @else
         <div class="table-wrap">
@@ -95,9 +115,9 @@
                         <th>Email</th>
                         <th>First Name</th>
                         <th>Company</th>
-                        <th>Related Domain</th>
+                        <th>List</th>
+                        <th>Website</th>
                         <th>Status</th>
-                        <th>Source</th>
                         <th style="width:190px;">Actions</th>
                     </tr>
                 </thead>
@@ -108,8 +128,15 @@
                         <td>{{ $lead->first_name ?? '—' }}</td>
                         <td>{{ $lead->company_name ?? '—' }}</td>
                         <td>
-                            @if($lead->domain)
-                                <a href="{{ route('domains.index') }}?d={{ $lead->domain }}" style="color:var(--accent);font-size:0.72rem;">{{ $lead->domain }}</a>
+                            @if($lead->list_name)
+                                <a href="{{ route('leads.index', ['list' => $lead->list_name]) }}" style="color:var(--blue);font-size:0.72rem;">☾ {{ $lead->list_name }}</a>
+                            @else
+                                <span style="color:var(--muted);">—</span>
+                            @endif
+                        </td>
+                        <td>
+                            @if($lead->website)
+                                <a href="{{ $lead->website }}" target="_blank" rel="noopener" style="color:var(--accent);font-size:0.72rem;">🌐 link</a>
                             @else
                                 <span style="color:var(--muted);">—</span>
                             @endif
@@ -173,6 +200,14 @@
                 <label class="form-label">Related Domain (optional)</label>
                 <input type="text" name="domain" class="form-input" placeholder="acme.com">
             </div>
+            <div class="form-group">
+                <label class="form-label">List Name (optional)</label>
+                <input type="text" name="list_name" class="form-input" placeholder="leads for example.com">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Website Link (optional)</label>
+                <input type="url" name="website" class="form-input" placeholder="https://acme.com/about">
+            </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-top:1.25rem;">
                 <button type="button" class="btn btn-ghost" onclick="document.getElementById('addLeadModal').classList.remove('open')">Cancel</button>
                 <button type="submit" class="btn btn-primary">Save Lead →</button>
@@ -208,6 +243,14 @@
                 <input type="text" name="domain" id="edit_domain" class="form-input" placeholder="acme.com">
             </div>
             <div class="form-group">
+                <label class="form-label">List Name</label>
+                <input type="text" name="list_name" id="edit_list_name" class="form-input" placeholder="leads for example.com">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Website Link</label>
+                <input type="url" name="website" id="edit_website" class="form-input" placeholder="https://acme.com/about">
+            </div>
+            <div class="form-group">
                 <label class="form-label">Status</label>
                 <select name="status" id="edit_status" class="form-input">
                     <option value="saved">Saved</option>
@@ -235,6 +278,7 @@
 <script>
     // Bulk lead email counter
     const bulkTextarea = document.querySelector('#bulkLeadForm textarea[name="emails"]');
+    const bulkListName = document.querySelector('#bulkLeadForm input[name="list_name"]');
     const leadCountEl  = document.getElementById('leadCount');
     const emailRegex   = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 
@@ -264,7 +308,7 @@
                         'X-CSRF-TOKEN': '{{ csrf_token() }}',
                         'Accept':       'application/json',
                     },
-                    body: JSON.stringify({ emails })
+                    body: JSON.stringify({ emails, list_name: bulkListName ? bulkListName.value : '' })
                 });
                 const data = await res.json();
                 if (data.success) {
@@ -279,6 +323,10 @@
             clearTimeout(saveTimer);
             saveTimer = setTimeout(autoSaveLeads, AUTOSAVE_DELAY);
         });
+
+        if (bulkListName) {
+            bulkListName.addEventListener('input', () => { clearTimeout(saveTimer); saveTimer = setTimeout(autoSaveLeads, AUTOSAVE_DELAY); });
+        }
     }
 
     function showSavePill(msg) {
@@ -305,6 +353,8 @@
         document.getElementById('edit_first_name').value   = lead.first_name || '';
         document.getElementById('edit_company_name').value = lead.company_name || '';
         document.getElementById('edit_domain').value       = lead.domain || '';
+        document.getElementById('edit_list_name').value    = lead.list_name || '';
+        document.getElementById('edit_website').value      = lead.website || '';
         document.getElementById('edit_status').value       = lead.status || 'saved';
         document.getElementById('edit_notes').value        = lead.notes || '';
         document.getElementById('editLeadForm').action     = '{{ route("leads.update", ":id") }}'.replace(':id', id);

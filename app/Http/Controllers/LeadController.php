@@ -14,14 +14,28 @@ class LeadController extends Controller
     // ============================================================
     public function index(Request $request)
     {
-        $leads = Lead::where('user_id', Auth::id())
-                     ->with('sourceCampaign')
-                     ->orderBy('updated_at', 'desc')
+        $lists = Lead::where('user_id', Auth::id())
+                     ->whereNotNull('list_name')
+                     ->where('list_name', '!=', '')
+                     ->selectRaw('list_name, COUNT(*) as total')
+                     ->groupBy('list_name')
+                     ->orderBy('list_name')
                      ->get();
+
+        $activeList = $request->input('list');
+
+        $query = Lead::where('user_id', Auth::id())
+                     ->with('sourceCampaign');
+
+        if ($activeList) {
+            $query->where('list_name', $activeList);
+        }
+
+        $leads = $query->orderBy('updated_at', 'desc')->get();
 
         $status = $request->input('status', 'saved');
 
-        return view('leads.index', compact('leads', 'status'));
+        return view('leads.index', compact('leads', 'status', 'lists', 'activeList'));
     }
 
     // ============================================================
@@ -34,6 +48,7 @@ class LeadController extends Controller
             'first_name'   => 'nullable|string|max:255',
             'company_name' => 'nullable|string|max:255',
             'domain'       => 'nullable|string|max:255',
+            'list_name'    => 'nullable|string|max:255',
             'website'      => 'nullable|url',
             'status'       => 'nullable|in:saved,contacted,replied,sold,lost',
             'notes'        => 'nullable|string',
@@ -50,6 +65,7 @@ class LeadController extends Controller
             'first_name'   => $request->first_name ?: $lead->first_name,
             'company_name' => $request->company_name ?: $lead->company_name,
             'domain'       => $request->domain ?: $lead->domain,
+            'list_name'    => $request->list_name ?: $lead->list_name,
             'website'      => $request->website ?: $lead->website,
             'status'       => $request->status ?? $lead->status ?? 'saved',
             'notes'        => $request->notes ?: $lead->notes,
@@ -78,6 +94,7 @@ class LeadController extends Controller
         }
 
         $domain     = $request->input('domain');
+        $listName   = $request->input('list_name');
         $campaignId = $request->input('campaign_id');
 
         $created = 0;
@@ -94,6 +111,7 @@ class LeadController extends Controller
                 if (!$lead->company_name) $lead->company_name = $extracted['company_name'];
                 if (!$lead->first_name)   $lead->first_name   = $extracted['first_name'];
                 if ($domain && !$lead->domain) $lead->domain = strtolower(trim($domain));
+                if (!$lead->list_name && $listName) $lead->list_name = $listName;
                 if ($lead->status === 'lost') $lead->status = 'saved';
                 $lead->save();
                 $updated++;
@@ -105,6 +123,7 @@ class LeadController extends Controller
                     'first_name'         => $extracted['first_name'],
                     'company_name'       => $extracted['company_name'],
                     'domain'             => $domain ? strtolower(trim($domain)) : null,
+                    'list_name'          => $listName ?: null,
                     'status'             => 'saved',
                 ]);
                 $created++;
@@ -133,6 +152,7 @@ class LeadController extends Controller
             'first_name'   => 'nullable|string|max:255',
             'company_name' => 'nullable|string|max:255',
             'domain'       => 'nullable|string|max:255',
+            'list_name'    => 'nullable|string|max:255',
             'website'      => 'nullable|url',
             'status'       => 'nullable|in:saved,contacted,replied,sold,lost',
             'notes'        => 'nullable|string',
@@ -143,6 +163,7 @@ class LeadController extends Controller
             'first_name'   => $request->first_name,
             'company_name' => $request->company_name,
             'domain'       => $request->domain ? strtolower(trim($request->domain)) : null,
+            'list_name'    => $request->list_name ?: null,
             'website'      => $request->website,
             'status'       => $request->status,
             'notes'        => $request->notes,
