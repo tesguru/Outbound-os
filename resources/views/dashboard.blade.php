@@ -154,12 +154,14 @@
                 <div style="height:100%;width:{{ $weekPct }}%;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--blue));transition:width .4s;"></div>
             </div>
         </div>
+        @if(\Illuminate\Support\Facades\Route::has('dashboard.target'))
         <form method="POST" action="{{ route('dashboard.target') }}" style="display:flex;gap:0.4rem;align-items:center;">
             @csrf
             <input type="number" name="weekly_email_target" value="{{ $weeklyTarget }}" min="1" max="1000"
                    style="width:64px;background:transparent;border:1px solid var(--border-hover);border-radius:6px;padding:0.3rem 0.4rem;color:var(--text);font-size:0.68rem;text-align:center;">
             <button type="submit" class="btn btn-ghost" style="font-size:0.62rem;padding:0.35rem 0.6rem;">Set Goal</button>
         </form>
+        @endif
     </div>
     @if($sentThisWeek >= $weeklyTarget)
         <div style="font-size:0.68rem;color:var(--accent);margin-top:0.6rem;">🎉 Weekly goal crushed — {{ $unlockedCount }}/{{ count($achievements) }} achievements unlocked.</div>
