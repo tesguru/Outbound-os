@@ -7,6 +7,7 @@ use App\Http\Controllers\CampaignController;
 use App\Http\Controllers\RecipientController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\DomainController;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 // ============================================================
@@ -25,73 +26,16 @@ Route::get('/auth/logout', [GoogleController::class, 'logout'])->name('logout');
 // ============================================================
 Route::middleware('auth')->group(function () {
 
-    // Dashboard
+    // Dashboard (view computes its own stats so it works with any cached route)
     Route::get('/dashboard', function () {
-        $user = Auth::user();
-
-        $totalRecipients = \App\Models\Recipient::whereHas('campaign', fn($q) => $q->where('user_id', $user->id))->count();
-        $draftsCreated   = \App\Models\Recipient::whereHas('campaign', fn($q) => $q->where('user_id', $user->id))->where('status', 'draft_created')->count();
-        $sent            = \App\Models\Recipient::whereHas('campaign', fn($q) => $q->where('user_id', $user->id))->whereIn('status', ['sent', 'replied'])->count();
-        $replied         = \App\Models\Recipient::whereHas('campaign', fn($q) => $q->where('user_id', $user->id))->where('status', 'replied')->count();
-
-        $totalLeads  = $user->leads()->count();
-        $soldLeads   = $user->leads()->where('status', 'sold')->count();
-        $totalDomains = $user->domains()->count();
-        $soldDomains = $user->domains()->where('status', 'sold')->count();
-        $domainSpent = (float) $user->domains()->sum('price');
-        $saleRevenue = (float) $user->domains()->where('status', 'sold')->sum('sold_price');
-
-        // Consistency stats — activity days based on when recipients were marked sent/replied
-        $activityDays = \App\Models\Recipient::whereHas('campaign', fn($q) => $q->where('user_id', $user->id))
-            ->whereIn('status', ['sent', 'replied'])
-            ->whereNotNull('updated_at')
-            ->pluck('updated_at')
-            ->map(fn($d) => $d->toDateString())
-            ->unique();
-
-        $streak = 0;
-        $cursor = now()->toDateString();
-        if ($activityDays->isEmpty()) {
-            $streak = 0;
-        } else {
-            while ($activityDays->contains($cursor)) {
-                $streak++;
-                $cursor = \Carbon\Carbon::parse($cursor)->subDay()->toDateString();
-            }
-        }
-
-        $sentThisWeek = \App\Models\Recipient::whereHas('campaign', fn($q) => $q->where('user_id', $user->id))
-            ->whereIn('status', ['sent', 'replied'])
-            ->where('updated_at', '>=', now()->startOfWeek())
-            ->count();
-
-        $recentReplies = \App\Models\Recipient::whereHas('campaign', fn($q) => $q->where('user_id', $user->id))
-            ->where('status', 'replied')
-            ->orderBy('updated_at', 'desc')
-            ->take(5)
-            ->get();
-
-        $quotes = [
-            "The domain you're selling is one email away from its new owner.",
-            "Every sent email is a swing of the bat. Keep swinging.",
-            "Sold domains started as unsent drafts.",
-            "Consistency beats intensity — one email a day wins.",
-            "Replies are earned by senders who refused to stop.",
-            "Nope isn't a failure, it's a filter. Keep sending.",
-            "The best sellers in the world are just the ones who sent more.",
-            "Your next SOLD could be sitting in your unsent drafts right now.",
-        ];
-        $quote = $quotes[now()->dayOfYear % count($quotes)];
-
-        $stats = compact(
-            'totalRecipients', 'draftsCreated', 'sent', 'replied',
-            'totalLeads', 'soldLeads', 'totalDomains', 'soldDomains',
-            'domainSpent', 'saleRevenue', 'streak', 'sentThisWeek',
-            'recentReplies', 'quote'
-        );
-
-        return view('dashboard', $stats);
+        return view('dashboard');
     })->name('dashboard');
+
+    Route::post('/dashboard/target', function (Request $request) {
+        $request->validate(['weekly_email_target' => 'required|integer|min:1|max:1000']);
+        Auth::user()->update(['weekly_email_target' => $request->integer('weekly_email_target')]);
+        return back()->with('success', '✅ Weekly target updated!');
+    })->name('dashboard.target');
 
     // Add Gmail Account
     Route::get('/auth/google/add-account', [GoogleController::class, 'redirectAccount'])->name('google.add-account');
