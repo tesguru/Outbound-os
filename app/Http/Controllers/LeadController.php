@@ -206,7 +206,8 @@ class LeadController extends Controller
 
     // ============================================================
     // SYNC LIST — the notepad autosave
-    // Adds what's typed, removes lines you deleted.
+    // ADD-ONLY: new emails are saved, existing ones are never
+    // removed or moved out of their list — no overwriting ever.
     // ============================================================
     public function syncList(Request $request)
     {
@@ -222,11 +223,6 @@ class LeadController extends Controller
         $emails = array_map('trim', $emails);
         $emails = array_filter($emails, fn($e) => filter_var($e, FILTER_VALIDATE_EMAIL));
         $emails = array_values(array_unique(array_map('strtolower', $emails)));
-
-        $existing = Lead::where('user_id', Auth::id())
-                        ->where('list_name', $listName)
-                        ->get()
-                        ->keyBy(fn($l) => strtolower($l->email));
 
         $added = 0;
         foreach ($emails as $email) {
@@ -244,28 +240,16 @@ class LeadController extends Controller
                 ]);
                 $added++;
             } elseif (in_array($lead->status, ['lost', 'saved', 'contacted'])) {
-                if ($lead->list_name !== $listName) $lead->list_name = $listName;
-                if ($lead->status === 'lost')       $lead->status   = 'saved';
+                // Keep an existing lead in whatever list it already lives in.
+                if (!$lead->list_name) $lead->list_name = $listName;
+                if ($lead->status === 'lost') $lead->status = 'saved';
                 $lead->save();
-                if (!isset($existing[strtolower($email)])) $added++;
-            }
-        }
-
-        // Lines you deleted leave this list (replied/sold leads are kept safe)
-        $removed  = 0;
-        $emailSet = array_flip($emails);
-        foreach ($existing as $email => $lead) {
-            if (!isset($emailSet[$email]) && in_array($lead->status, ['saved', 'contacted'])) {
-                $lead->list_name = null;
-                $lead->save();
-                $removed++;
             }
         }
 
         return response()->json([
             'success' => true,
             'added'   => $added,
-            'removed' => $removed,
             'total'   => count($emails),
         ]);
     }

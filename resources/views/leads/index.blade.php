@@ -120,10 +120,7 @@
                 if (existing) existing.emails = area.value;
                 else notepads.push({ name: currentList, emails: area.value });
                 syncCount();
-                const parts = [];
-                if (data.added  > 0) parts.push('+' + data.added);
-                if (data.removed > 0) parts.push('−' + data.removed);
-                setStatus(parts.length ? '✓ saved (' + parts.join(', ') + ')' : '✓ saved', 'var(--accent)');
+                setStatus(data.added > 0 ? '✓ saved (+' + data.added + ' new)' : '✓ saved', 'var(--accent)');
             } else {
                 setStatus('⚠ could not save', 'var(--red)');
             }
