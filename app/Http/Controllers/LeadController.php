@@ -17,25 +17,39 @@ class LeadController extends Controller
         $lists = Lead::where('user_id', Auth::id())
                      ->whereNotNull('list_name')
                      ->where('list_name', '!=', '')
+                     ->where('status', '!=', 'lost')
                      ->selectRaw('list_name, COUNT(*) as total')
                      ->groupBy('list_name')
                      ->orderBy('list_name')
                      ->get();
 
-        $activeList = $request->input('list');
-
-        $query = Lead::where('user_id', Auth::id())
-                     ->with('sourceCampaign');
+        $activeList   = $request->input('list');
+        $notepadLeads = null;
 
         if ($activeList) {
-            $query->where('list_name', $activeList);
+            $notepadLeads = Lead::where('user_id', Auth::id())
+                                ->where('list_name', $activeList)
+                                ->where('status', '!=', 'lost')
+                                ->orderBy('email')
+                                ->pluck('email');
         }
 
-        $leads = $query->orderBy('updated_at', 'desc')->get();
+        // Hydration for the notepad switcher (name => emails block)
+        $notepads = $lists->map(function ($l) {
+            return [
+                'name'   => $l->list_name,
+                'emails' => Lead::where('user_id', Auth::id())
+                                ->where('list_name', $l->list_name)
+                                ->where('status', '!=', 'lost')
+                                ->orderBy('email')
+                                ->pluck('email')
+                                ->implode("\n"),
+            ];
+        });
 
-        $status = $request->input('status', 'saved');
+        $totalLeads = Lead::where('user_id', Auth::id())->count();
 
-        return view('leads.index', compact('leads', 'status', 'lists', 'activeList'));
+        return view('leads.index', compact('lists', 'activeList', 'notepadLeads', 'notepads', 'totalLeads'));
     }
 
     // ============================================================
@@ -188,6 +202,91 @@ class LeadController extends Controller
 
         return redirect()->route('leads.index')
                          ->with('success', '✅ Lead status updated!');
+    }
+
+    // ============================================================
+    // SYNC LIST — the notepad autosave
+    // Adds what's typed, removes lines you deleted.
+    // ============================================================
+    public function syncList(Request $request)
+    {
+        $request->validate([
+            'list_name' => 'required|string|max:255',
+            'emails'    => 'nullable|string',
+        ]);
+
+        $listName = $request->input('list_name');
+        $raw      = $request->input('emails', '');
+
+        $emails = preg_split('/[\s,;]+/', $raw);
+        $emails = array_map('trim', $emails);
+        $emails = array_filter($emails, fn($e) => filter_var($e, FILTER_VALIDATE_EMAIL));
+        $emails = array_values(array_unique(array_map('strtolower', $emails)));
+
+        $existing = Lead::where('user_id', Auth::id())
+                        ->where('list_name', $listName)
+                        ->get()
+                        ->keyBy(fn($l) => strtolower($l->email));
+
+        $added = 0;
+        foreach ($emails as $email) {
+            $lead = Lead::where('user_id', Auth::id())->where('email', $email)->first();
+
+            if (!$lead) {
+                $extracted = GmailService::extractNamesFromEmail($email);
+                Lead::create([
+                    'user_id'      => Auth::id(),
+                    'email'        => $email,
+                    'first_name'   => $extracted['first_name'],
+                    'company_name' => $extracted['company_name'],
+                    'list_name'    => $listName,
+                    'status'       => 'saved',
+                ]);
+                $added++;
+            } elseif (in_array($lead->status, ['lost', 'saved', 'contacted'])) {
+                if ($lead->list_name !== $listName) $lead->list_name = $listName;
+                if ($lead->status === 'lost')       $lead->status   = 'saved';
+                $lead->save();
+                if (!isset($existing[strtolower($email)])) $added++;
+            }
+        }
+
+        // Lines you deleted leave this list (replied/sold leads are kept safe)
+        $removed  = 0;
+        $emailSet = array_flip($emails);
+        foreach ($existing as $email => $lead) {
+            if (!isset($emailSet[$email]) && in_array($lead->status, ['saved', 'contacted'])) {
+                $lead->list_name = null;
+                $lead->save();
+                $removed++;
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'added'   => $added,
+            'removed' => $removed,
+            'total'   => count($emails),
+        ]);
+    }
+
+    // ============================================================
+    // RENAME LIST — rename a notepad
+    // ============================================================
+    public function renameList(Request $request)
+    {
+        $request->validate([
+            'old_name'  => 'required|string|max:255',
+            'list_name' => 'required|string|max:255',
+        ]);
+
+        if ($request->old_name !== $request->list_name) {
+            Lead::where('user_id', Auth::id())
+                ->where('list_name', $request->old_name)
+                ->update(['list_name' => $request->list_name]);
+        }
+
+        return redirect()->route('leads.index', ['list' => $request->list_name]);
     }
 
     // ============================================================

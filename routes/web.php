@@ -58,6 +58,8 @@ Route::middleware('auth')->group(function () {
     Route::get('/leads', [LeadController::class, 'index'])->name('leads.index');
     Route::post('/leads', [LeadController::class, 'store'])->name('leads.store');
     Route::post('/leads/bulk', [LeadController::class, 'bulkStore'])->name('leads.bulk-store');
+    Route::post('/leads/sync', [LeadController::class, 'syncList'])->name('leads.sync');
+    Route::post('/leads/rename', [LeadController::class, 'renameList'])->name('leads.rename');
     Route::put('/leads/{id}', [LeadController::class, 'update'])->name('leads.update');
     Route::patch('/leads/{id}/status', [LeadController::class, 'status'])->name('leads.status');
     Route::delete('/leads/{id}', [LeadController::class, 'destroy'])->name('leads.destroy');
